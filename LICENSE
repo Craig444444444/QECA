@@ -1,0 +1,33 @@
+GNU GENERAL PUBLIC LICENSE
+Version 3, 29 June 2007
+
+Copyright (C) 2025 Craig Huckerby <Craighckby@gmail.com>
+
+This program incorporates an Ethical Addendum to the GNU GPLv3 terms.
+Full text available at: https://www.gnu.org/licenses/gpl-3.0.en.html
+
+Additional Ethical Terms (Section 7 Exceptions):
+1. Military Weaponization Prohibition
+   - This software may not be used for:
+     * Nuclear, chemical, or biological weapons development/operation
+     * Surveillance systems violating human rights conventions
+     * Autonomous weapons systems
+
+2. Ethical Inheritance Clause
+   - All derivative works must:
+     * Retain this ethical addendum
+     * Disclose modifications to governance layers
+     * Provide audit trails for commercial applications
+
+3. Transparency Requirement
+   - Users must publicly disclose:
+     * Deployment domains (e.g., healthcare, finance)
+     * Ethical risk assessments
+     * Quantum computing resources utilized
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+[Insert full GPLv3 text here - GitHub will auto-recognize it]
