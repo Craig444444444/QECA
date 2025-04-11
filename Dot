@@ -1,0 +1,648 @@
+# --------------------------------------------------------------------------
+#   Quantum-Enhanced Phishing Detector and Self-Learning Resource Scraper
+# --------------------------------------------------------------------------
+
+# Install Required Libraries
+!pip install pennylane scikit-learn requests pandas gradio aiohttp aiolimiter fake-useragent beautifulsoup4 python-dotenv ipywidgets --quiet
+
+import os
+import re
+import asyncio
+import aiohttp
+import numpy as np
+import pandas as pd
+from urllib.parse import urlparse, quote_plus, unquote
+from fake_useragent import UserAgent
+from aiolimiter import AsyncLimiter
+from bs4 import BeautifulSoup
+import pennylane as qml
+from sklearn.svm import SVC
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import gradio as gr
+from dotenv import load_dotenv
+import requests
+import io
+import json
+import pyperclip
+from IPython.display import display, HTML, clear_output
+import ipywidgets as widgets  # Import ipywidgets
+
+# Load environment variables (for API keys, etc.)
+load_dotenv()
+
+# --- Configuration ---
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")  # Replace with your API Key or set in .env
+CSE_ID = os.getenv("CSE_ID")  # Replace with your CSE ID or set in .env
+SEARCH_ENGINE = "google"
+NUM_RESULTS = 5
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+CIRCUIT_CACHE_FILE = "circuit_cache.pkl"
+HASH_FILE = "circuit_hash.txt"
+CIRCUIT_VERSION = "1.3"
+
+# --- Quantum Configuration ---
+n_qubits = 6
+dev = qml.device("lightning.qubit", wires=n_qubits)
+
+# --------------------------
+# Quantum Components
+# --------------------------
+
+@qml.QNode(dev)
+def quantum_feature_map(features):
+    """Quantum feature mapping with error mitigation"""
+    features = np.array(features)
+    normalized_features = features / np.max(np.abs(features) + 1e-8)
+    # Robust embedding with fallback
+    try:
+        qml.AmplitudeEmbedding(features=normalized_features, wires=range(n_qubits), normalize=True)
+    except:
+        qml.AngleEmbedding(features=normalized_features, wires=range(n_qubits), rotation='Y')
+    # Hardware-efficient variational layers
+    for _ in range(2):
+        for wire in range(n_qubits):
+            qml.CNOT(wires=[wire, (wire + 1) % n_qubits])
+            qml.RY(np.pi * (normalized_features[wire % len(normalized_features)]), wires=wire)
+    return qml.expval(qml.PauliZ(0) @ qml.PauliZ(1))
+
+# --------------------------
+# Web Intelligence Components
+# --------------------------
+
+class WebIntelligenceEngine:
+    def __init__(self):
+        self.rate_limiter = AsyncLimiter(5, 1)  # 5 requests/second
+        self.user_agent = UserAgent()
+        self.proxy_list = []
+        self.current_proxy_idx = 0
+
+    async def load_proxies(self, sources=[
+        "https://api.proxyscrape.com/v2/?request=getproxies&protocol=http",
+        "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"
+    ]):
+        """Load and validate proxies from multiple sources"""
+        async with aiohttp.ClientSession() as session:
+            tasks = [self._fetch_proxies(session, url) for url in sources]
+            results = await asyncio.gather(*tasks)
+        self.proxy_list = list(set([p for sublist in results for p in sublist]))
+        await self.validate_proxies()
+
+    async def _fetch_proxies(self, session, url):
+        """Fetch proxies from a single source"""
+        try:
+            async with self.rate_limiter:
+                async with session.get(url, timeout=10) as response:
+                    return (await response.text()).splitlines()
+        except:
+            return []
+
+    async def validate_proxy(self, proxy):
+        """Validate a single proxy"""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    'http://httpbin.org/ip',
+                    proxy=f'http://{proxy}',
+                    timeout=10
+                ) as response:
+                    if response.status == 200:
+                        return proxy
+        except:
+            return None
+
+    async def validate_proxies(self):
+        """Validate all loaded proxies"""
+        tasks = [self.validate_proxy(proxy) for proxy in self.proxy_list]
+        results = await asyncio.gather(*tasks)
+        self.proxy_list = [p for p in results if p is not None]
+
+    def get_next_proxy(self):
+        """Get next proxy with round-robin rotation"""
+        if not self.proxy_list:
+            return None
+        proxy = self.proxy_list[self.current_proxy_idx]
+        self.current_proxy_idx = (self.current_proxy_idx + 1) % len(self.proxy_list)
+        return {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
+
+    async def fetch_with_retry(self, url, max_retries=3):
+        """Robust fetching with proxy rotation and retries"""
+        headers = {'User-Agent': self.user_agent.random}
+        for _ in range(max_retries):
+            proxy = self.get_next_proxy()
+            try:
+                async with self.rate_limiter:
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(
+                            url,
+                            headers=headers,
+                            proxy=proxy.get('http') if proxy else None,
+                            timeout=10
+                        ) as response:
+                            if response.status == 200:
+                                return await response.text()
+            except Exception as e:
+                print(f"Fetch failed: {e}")  # Log the failure
+                continue
+        return None
+
+    async def google_search(self, query, num_results=5):
+        """Fetch Google search results with scraping protection bypass"""
+        if not GOOGLE_API_KEY or not CSE_ID:
+            print("Warning: Google API key or CSE ID not set.  Falling back to basic search.")
+            search_url = f"https://www.google.com/search?q={quote_plus(query)}&num={num_results}"
+            content = await self.fetch_with_retry(search_url)
+            if not content:
+                return []
+            soup = BeautifulSoup(content, 'html.parser')
+            results = []
+            for g in soup.find_all('div', class_='tF2Cxc'):
+                link = g.find('a', href=True)
+                if link and 'url?q=' in link['href']:
+                    url = unquote(link['href'].split('url?q=')[1].split('&')[0])
+                    if url not in results and url.startswith("http"):
+                         results.append(url)
+            return results
+        else:
+            try:
+                # Google Custom Search Engine API
+                api_url = f"https://www.googleapis.com/customsearch/v1?key={GOOGLE_API_KEY}&cx={CSE_ID}&q={quote_plus(query)}&num={num_results}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(api_url, timeout=10) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            return [item['link'] for item in data.get('items', [])]
+                        else:
+                            print(f"Google Search API Error: {response.status}")
+                            return []
+            except Exception as e:
+                print(f"Google Search API Error: {e}")
+                return []
+
+# --------------------------
+# Core Phishing Detection
+# --------------------------
+
+class QuantumPhishingDetector:
+    def __init__(self):
+        self.web_engine = WebIntelligenceEngine()
+        self.scaler = StandardScaler()
+        self.model = None
+        self.data = None
+
+    async def initialize(self):
+        """Initialize with proxy loading and model training"""
+        await self.web_engine.load_proxies()
+        await self.load_and_preprocess_data()
+        self.train_quantum_enhanced_svm()
+
+    async def load_and_preprocess_data(self, synthetic_data_size=100):
+        """Load data with web intelligence integration"""
+        try:
+            # Augment with live phishing URLs from web search
+            phishing_urls = await self.web_engine.google_search('phishing site:*.org', 20)
+            legit_urls = await self.web_engine.google_search('safe site:*.com', 20)
+            live_data = pd.DataFrame({
+                'url': phishing_urls + legit_urls,
+                'label': [1]*len(phishing_urls) + [0]*len(legit_urls)
+            })
+            self.data = pd.concat([live_data, generate_synthetic_data(synthetic_data_size)])
+        except Exception as e:
+            print(f"Web data loading failed: {e}")
+            self.data = generate_synthetic_data(synthetic_data_size)
+
+        # Feature processing
+        self.data['features'] = self.data['url'].apply(extract_features)
+        features_df = pd.DataFrame(self.data['features'].tolist())
+        X = features_df.values
+        y = self.data['label'].values
+        X = self.scaler.fit_transform(X)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        self.X_train, self.X_test, self.y_train, self.y_test = X_train, X_test, y_train, y_test
+
+    def train_quantum_enhanced_svm(self):
+        """Quantum-enhanced training with error handling"""
+        if self.data is None:
+            print("No data loaded, cannot train.")
+            return
+
+        # Define a quantum kernel
+        def quantum_kernel(x1, x2):
+            return qml.QNode(quantum_feature_map, dev)(x1)
+
+        self.model = SVC(kernel=quantum_kernel, probability=True)
+        self.model.fit(self.X_train, self.y_train)
+        print("Quantum-enhanced SVM trained.")
+
+    async def enhanced_predict(self, url):
+        """Enhanced prediction with live web verification"""
+        if self.model is None or self.scaler is None:
+            print("Model not trained, can't predict.")
+            return {
+                'verdict': "Cannot Predict",
+                'local_scores': [0,0,0],
+                'reputation_score': 0,
+                'related_domains': []
+            }
+
+        # Local model prediction
+        local_verdict, scores = self.predict_phishing(url)
+
+        # Web verification
+        domain = urlparse(url).netloc
+        search_results = await self.web_engine.google_search(f'site:{domain}')
+        reputation_score = len(search_results)/10
+
+        # Combine results
+        final_verdict = "Legitimate" if (
+            local_verdict == "Legitimate" and
+            reputation_score > 0.7
+        ) else "Suspicious"
+
+        return {
+            'verdict': final_verdict,
+            'local_scores': scores,
+            'reputation_score': reputation_score,
+            'related_domains': search_results[:3]
+        }
+
+    def predict_phishing(self, url):
+        """Predicts whether a URL is a phishing attempt."""
+        try:
+            # Extract and preprocess features
+            features_dict = extract_features(url)
+            features = np.array(list(features_dict.values())).reshape(1, -1)
+            features_scaled = self.scaler.transform(features)
+
+            # Get scores
+            curse_score = calculate_curse_score(url)
+            sorrow_score = calculate_sorrow_score(url)
+            entropy_score = calculate_entropy_score(url)
+
+            # Predict with the model
+            prediction = self.model.predict(features_scaled)[0]
+
+            # Decision based on scores
+            verdict = "Phishing Detected" if prediction == 1 or curse_score > 0.6 or sorrow_score > 0.6 or entropy_score > 0.6 else "Legitimate"
+            if curse_score > 0.7:
+                quarantine_url(url)
+                verdict = "⚠️ HIGH RISK: Quarantined"
+            elif sorrow_score > 0.7:
+                verdict = "⚠️ HIGH RISK: Potential Emotional Manipulation"
+            return verdict, [curse_score, sorrow_score, entropy_score]
+        except Exception as e:
+            print(f"Error during prediction: {e}")
+            return "Error during prediction", [0, 0, 0]
+
+# --------------------------
+# Gradio Interface
+# --------------------------
+
+async def run_detection(url):
+    detector = QuantumPhishingDetector()
+    await detector.initialize()
+    results = await detector.enhanced_predict(url)
+
+    output = f"""
+    <div style="font-family: monospace; border: 1px solid #ccc; padding: 10px; border-radius: 5px;">
+        <p><b>URL:</b> {url}</p>
+        <p><b>Final Verdict:</b> <span style="{'color: red;' if 'Phishing' in results['verdict'] or 'Suspicious' in results['verdict'] else 'color: green;'}">{results['verdict']}</span></p>
+        <p><b>Quantum Analysis:</b></p>
+        <ul>
+            <li><b>Curse Score:</b> {results['local_scores'][0]:.2f}</li>
+            <li><b>Sorrow Score:</b> {results['local_scores'][1]:.2f}</li>
+            <li><b>Entropy Score:</b> {results['local_scores'][2]:.2f}</li>
+        </ul>
+        <p><b>Web Intelligence:</b></p>
+        <ul>
+            <li><b>Domain Reputation:</b> {results['reputation_score']:.2f}</li>
+            <li><b>Related Domains:</b> {', '.join(results['related_domains'])}</li>
+        </ul>
+    </div>
+    """
+    if results['verdict'] != "Legitimate":
+        output += "\n\n⚠️ **Warning**: This URL exhibits suspicious characteristics!"
+    return output
+
+iface = gr.Interface(
+    fn=run_detection,
+    inputs=gr.Textbox(label="Enter URL"),
+    outputs=gr.HTML(label="Analysis Results"),
+    title="🔮 Quantum Web Intelligence Phishing Detector 🛡️",
+    description="Unveiling the secrets of the web, one URL at a time. This detector combines quantum machine learning with real-time web analysis to identify phishing attempts.  Prepare to be amazed!",
+    theme="huggingface"  # Using the "huggingface" theme for a modern look
+)
+
+# --------------------------
+# Universal Self-Learning Resource Scraper
+# --------------------------
+
+# --- Configuration ---
+initial_topics = [
+    "Python programming",
+    "JavaScript fundamentals",
+    "Data structures and algorithms",
+    "Machine learning with Python",
+    "Deep learning with TensorFlow",
+    "React.js tutorial",
+    "Java programming tutorial",
+    "SQL for beginners",
+    "Git and version control",
+    "Cloud computing (AWS, Azure, GCP)",
+    "Cybersecurity fundamentals",
+    "Blockchain technology",
+    "Artificial Intelligence",
+    "Natural Language Processing",
+    "Computer Vision",
+    "Operating Systems",
+    "Networking",
+    "Databases",
+    "Software Engineering",
+    "Web Development",
+    "Mobile App Development",
+    "Game Development",
+    "Data Science"
+]
+
+# --- Persistent Storage ---
+try:
+    with open("universal_links.json", "r") as f:
+        all_links = json.load(f)
+    print("Loaded previously saved links.")
+except FileNotFoundError:
+    all_links = {}  # Dictionary to store links, keyed by topic.
+    print("No previous links found. Starting with an empty dictionary.")
+except json.JSONDecodeError:
+    all_links = {}
+    print("Error decoding universal_links.json. Starting with an empty dictionary.")
+
+# --- Search Function (Simplified - Adapt for other search engines) ---
+def search_google(query, num_results=NUM_RESULTS):
+    """Searches Google for a given query and returns a list of URLs."""
+    if not GOOGLE_API_KEY or not CSE_ID:
+      print("Using Basic Google Search (API Key/CSE ID not set).")
+      search_url = f"https://www.google.com/search?q={quote_plus(query)}&num={num_results}"
+      headers = {"User-Agent": USER_AGENT}
+      try:
+          response = requests.get(search_url, headers=headers, timeout=10)
+          response.raise_for_status()  # Raise an exception for bad status codes
+          soup = BeautifulSoup(response.text, "html.parser")
+          links = []
+          for a_tag in soup.find_all("a", href=True):
+              href = a_tag["href"]
+              if href.startswith("/url?q="): # Google's way to hide the real URLs
+                  real_url = unquote(href.split("?q=")[1].split("&")[0])
+                  if real_url not in links and real_url.startswith("http"): #Avoid duplicates and non-http links
+                      links.append(real_url)
+          return links
+      except requests.exceptions.RequestException as e:
+          print(f"Search Error: {e}")
+          return []
+    else:
+        try:
+            # Google Custom Search Engine API
+            api_url = f"https://www.googleapis.com/customsearch/v1?key={GOOGLE_API_KEY}&cx={CSE_ID}&q={quote_plus(query)}&num={num_results}"
+            response = requests.get(api_url, headers={"User-Agent": USER_AGENT}, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            return [item['link'] for item in data.get('items', [])]
+        except requests.exceptions.RequestException as e:
+            print(f"Google Search API Error: {e}")
+            return []
+
+# --- Function to Scrape Results ---
+def scrape_learning_resources(topics):
+    """Scrapes learning resources for a list of topics."""
+    for topic in topics:
+        print(f"Searching for resources on: {topic}")
+        if topic not in all_links:
+            all_links[topic] = []  # Initialize an empty list for this topic
+        if SEARCH_ENGINE == "google":
+            search_results = search_google(topic)
+        # Add elif blocks here for other search engines (e.g., duckduckgo)
+        else:
+            search_results = []
+            print("Unsupported search engine.")
+        for link in search_results:
+            if link not in all_links[topic]:
+                all_links[topic].append(link)
+                print(f"  Found: {link}")
+        save_links() # Save after processing each topic.
+    display_links() # Update display after scraping.
+
+# ---  Helper Functions (Display and Save) ---
+def save_links():
+    """Saves the all_links dictionary to a JSON file."""
+    try:
+        with open("universal_links.json", "w") as f:
+            json.dump(all_links, f)
+        print("Links saved.")
+    except Exception as e:
+        print(f"Error saving links: {e}")
+
+def display_links():
+    """Displays the links, grouped by topic, with HTML hyperlinks."""
+    with output:
+        clear_output(wait=True)
+        if all_links:
+            html_output = "<h2>Collected Learning Resources:</h2>"
+            for topic, links in all_links.items():
+                html_output += f"<h3>{topic}</h3><ul>"
+                for i, link in enumerate(links):
+                    html_output += f"<li><a href='{link}' target='_blank'>{link}</a></li>"
+                html_output += "</ul>"
+            display(HTML(html_output))
+        else:
+            print("No learning resources found yet.  Run the search or add topics.")
+
+def copy_all_links_to_clipboard():
+    """Copies all links (across all topics) to the clipboard, one link per line."""
+    all_links_list = []
+    for topic, links in all_links.items():
+        all_links_list.extend(links)  # Flatten list
+    if all_links_list:
+        text_to_copy = "\n".join(all_links_list)
+        pyperclip.copy(text_to_copy)
+        print("All links (across all topics) copied to clipboard!")
+    else:
+        print("No links to copy.")
+
+# --- Feature Extraction Functions (Moved for reusability) ---
+def extract_features(url):
+    """Extracts features from a URL."""
+    try:
+        parsed_url = urlparse(url)
+        url_length = len(url)
+        path_length = len(parsed_url.path)
+        has_ip = bool(re.match(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', parsed_url.netloc))
+        has_https = parsed_url.scheme == 'https'
+        num_dots = url.count('.')
+        num_hyphens = url.count('-')
+        return {
+            'url_length': url_length,
+            'path_length': path_length,
+            'has_ip': int(has_ip),
+            'has_https': int(has_https),
+            'num_dots': num_dots,
+            'num_hyphens': num_hyphens,
+        }
+    except:
+        return {
+            'url_length': 0,
+            'path_length': 0,
+            'has_ip': 0,
+            'has_https': 0,
+            'num_dots': 0,
+            'num_hyphens': 0,
+        }
+
+def calculate_curse_score(url):
+    """Calculates a 'Curse' score based on suspicious keywords and patterns."""
+    curse_score = 0
+    if re.search(r'\b(login|account|update|secure)\b', url, re.IGNORECASE):
+        curse_score += 0.3
+    if re.search(r'\b(free|gift|claim|win)\b', url, re.IGNORECASE):
+        curse_score += 0.4
+    if re.search(r'\b(paypal|amazon|bank|microsoft)\b', url, re.IGNORECASE):
+        curse_score += 0.2
+    if re.search(r'\b(http:\/\/)', url, re.IGNORECASE):
+        curse_score += 0.2
+    return min(1, curse_score)  # Cap at 1
+
+def calculate_sorrow_score(url):
+    """Calculates a 'Sorrow' score based on the use of emotional keywords."""
+    sorrow_score = 0
+    if re.search(r'\b(urgent|warning|alert|security)\b', url, re.IGNORECASE):
+        sorrow_score += 0.4
+    if re.search(r'\b(verify|confirm|secure|protect)\b', url, re.IGNORECASE):
+        sorrow_score += 0.3
+    if re.search(r'\b(compromised|suspended|locked)\b', url, re.IGNORECASE):
+        sorrow_score += 0.5
+    return min(1, sorrow_score)
+
+def calculate_entropy_score(url):
+    """Calculates an 'Entropy' score based on URL randomness."""
+    entropy_score = 0
+    # Calculate the ratio of non-alphanumeric characters to the total length
+    non_alphanumeric_count = sum(not char.isalnum() for char in url)
+    entropy_score += (non_alphanumeric_count / len(url)) * 0.8
+    # Check if there are long strings of random characters
+    if re.search(r'[a-z0-9]{10,}', url):
+        entropy_score += 0.2
+    return min(1, entropy_score)
+
+def generate_synthetic_data(num_samples=100):
+    """Generates synthetic phishing dataset with URLs and labels."""
+    import pandas as pd
+    from faker import Faker
+    import numpy as np
+    fake = Faker()
+    data = pd.DataFrame({
+        'url': [
+            fake.url(schemes=["http", "https"]) if np.random.rand() < 0.8 else fake.url()
+            for _ in range(num_samples)
+        ],
+        'label': [np.random.randint(0, 2) for _ in range(num_samples)]  # 0 or 1 (legit/phish)
+    })
+    return data
+
+def quarantine_url(url):
+    """This will be the core of the quarantine system"""
+    print(f"⚠️ WARNING: The URL '{url}' has been quarantined due to high risk.")
+
+# --- Widget Creation ---
+topic_input = widgets.Text(
+    value='',
+    placeholder='Enter a topic to search...',
+    description='Add Topic:',
+    disabled=False
+)
+
+add_topic_button = widgets.Button(
+    description='Add Topic & Search',
+    disabled=False,
+    button_style='',
+    tooltip='Add a topic to the list and search for resources',
+    icon=''
+)
+
+scrape_button = widgets.Button(
+    description="Scrape Learning Resources (for all Topics)",
+    disabled=False,
+    button_style='success',
+    tooltip="Search for resources based on the current topic list",
+    icon='search'
+)
+
+clear_all_button = widgets.Button(
+    description="Clear All Topics and Links",
+    disabled=False,
+    button_style='warning',
+    tooltip="Remove all topics and links",
+    icon='remove'
+)
+
+copy_all_button = widgets.Button(
+    description="Copy All Links (across all topics)",
+    disabled=False,
+    button_style='info',
+    tooltip="Copy all links to clipboard",
+    icon='copy'
+)
+
+output = widgets.Output()
+
+# --- Button Click Handlers ---
+def add_topic_clicked(b):
+    with output:
+        topic = topic_input.value.strip()
+        if topic:
+            print(f"Adding and searching for resources on: {topic}")
+            scrape_learning_resources([topic]) # Directly scrape for the added topic
+            topic_input.value = ''  # Clear the input field
+        else:
+            print("Please enter a topic.")
+
+def scrape_all_clicked(b):
+    with output:
+        if initial_topics or all_links:  #Scrape for all the initial topics or existing topics
+            scrape_learning_resources(list(all_links.keys()) + initial_topics)
+        else:
+            print("No topics to scrape.")
+
+def clear_all_clicked(b):
+    with output:
+        global all_links
+        all_links = {}
+        topic_input.value = ''
+        save_links()
+        display_links()
+        print("All topics and links cleared.")
+
+def copy_all_clicked(b):
+    with output:
+        copy_all_links_to_clipboard()
+
+# --- Widget Event Binding ---
+add_topic_button.on_click(add_topic_clicked)
+scrape_button.on_click(scrape_all_clicked)
+clear_all_button.on_click(clear_all_clicked)
+copy_all_button.on_click(copy_all_clicked)
+
+# --- Display Widgets ---
+display(topic_input)
+display(add_topic_button)
+display(scrape_button)
+display(clear_all_button)
+display(copy_all_button)
+display(output)
+
+# --- Initial Search and Display ---
+scrape_learning_resources(initial_topics)  # Run initial search after displaying widgets.
+
+# --------------------------
+# Run the Gradio Interface
+# --------------------------
+
+if __name__ == "__main__":
+    iface.launch(debug=True, share=True)
