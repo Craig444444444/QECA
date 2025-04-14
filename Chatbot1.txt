@@ -1,0 +1,132 @@
+# Install needed packages
+!pip install python-docx duckduckgo-search wikipedia
+
+# Imports
+import os
+import random
+import time
+import wikipedia
+from duckduckgo_search import DDGS
+from docx import Document
+
+# Initialize memory
+memory = []
+user_name = "Craig"
+bot_name = "MemoryBot"
+
+# Load .docx files from /content/
+def load_documents_from_colab(path="/content/"):
+    print("Scanning documents in /content/...")
+    for file in os.listdir(path):
+        if file.endswith(".docx"):
+            try:
+                doc = Document(os.path.join(path, file))
+                fullText = "\n".join([para.text for para in doc.paragraphs])
+                memory.append(fullText)
+                print(f"Loaded memory from: {file}")
+            except Exception as e:
+                print(f"Failed to read {file}: {e}")
+        # Add this 'else if' block to also load .txt files (if you have any)
+        elif file.endswith(".txt"):
+            try:
+                with open(os.path.join(path, file), "r", encoding="utf-8") as f:
+                    fullText = f.read()
+                    memory.append(fullText)
+                    print(f"Loaded memory from: {file}")
+            except Exception as e:
+                print(f"Failed to read {file}: {e}")
+
+
+# Web search
+def search_web(query):
+    print(f"\nSearching for: {query}")
+    ddg_results = []
+    wiki_summary = "Not found."
+    try:
+        with DDGS() as ddgs:
+            ddg_results = list(ddgs.text(query, max_results=2))
+        wiki_summary = wikipedia.summary(query, sentences=2)
+    except:
+        pass
+    return {
+        "DuckDuckGo": ddg_results,
+        "Wikipedia": wiki_summary,
+        "Wikileaks": "Simulated - no result found."
+    }
+
+# Chatbot logic
+def chatbot_reply(user_input):
+    user_input_lower = user_input.lower()
+
+    if "name is" in user_input_lower:
+        global user_name
+        user_name = user_input.split("name is")[-1].strip().split()[0]
+        return f"Nice to meet you, {user_name}."
+
+    elif "your name" in user_input_lower:
+        return f"My name is {bot_name}. You gave it to me."
+
+    elif "remember" in user_input_lower:
+        memory.append(user_input)
+        return "Got it. I'll remember that."
+
+    elif "what do you know" in user_input_lower:
+        return f"I know {len(memory)} things — mostly from files and you."
+
+    elif user_input_lower == "analyse files":  # ADDED THIS CONDITION
+        #  Placeholder for file analysis logic
+        #  For now, let's just return a message
+        return "I've read the files. They contain information about the universe, math, logic, DNA, and proofs."
+
+    elif any(q in user_input_lower for q in ["who", "what", "where", "when", "how"]):
+        results = search_web(user_input)
+        return f"""
+DuckDuckGo: {[r['body'] for r in results['DuckDuckGo']] or 'No results'}
+Wikipedia: {results['Wikipedia']}
+Wikileaks (simulated): {results['Wikileaks']}
+        """.strip()
+
+    elif "page 481" in user_input_lower:
+        # Improved handling of "page 481"
+        context_all_files = ""
+        found = False  # Flag to track if "Page 481" was found
+        for file in os.listdir("/content/"):
+            if file.endswith(".docx"):
+                try:
+                    doc = Document(os.path.join("/content/", file))
+                    full_text = "\n".join([para.text for para in doc.paragraphs])
+                    if "Page 481" in full_text:
+                        found = True
+                        index = full_text.find("Page 481")
+                        context = full_text[max(0, index - 200):min(len(full_text), index + 500)]  # Adjust context length
+                        context_all_files += f"\n--- From file: {file} ---\n{context}\n"
+                except Exception as e:
+                    context_all_files += f"\nError reading {file}: {e}\n"
+        if found:
+            return "Here's what I found related to 'Page 481' in the documents:\n" + context_all_files
+        else:
+            return "I couldn't find any relevant information about 'Page 481' in the loaded .docx files."
+
+    else:
+        # Check memory for keywords
+        for entry in memory:
+            if any(word in entry.lower() for word in user_input_lower.split()):
+                return f"I remember something about that: \"{entry[:150]}...\""
+        return "Hmm, not sure. Want me to look it up?"
+
+# Run the bot
+def run_chatbot():
+    print(f"Welcome to {bot_name} v3, {user_name}! Type 'exit' to quit.\n")
+    load_documents_from_colab()
+
+    while True:
+        user_input = input("You: ")
+        if user_input.lower() in ['exit', 'quit']:
+            print("Bot: Goodbye!")
+            break
+
+        response = chatbot_reply(user_input)
+        print("Bot:", response)
+
+# Start
+run_chatbot()
